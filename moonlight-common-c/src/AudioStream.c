@@ -373,6 +373,75 @@ static void AudioReceiveThreadProc(void* context) {
                 }
             }
         }
+
+        // Audio network drain optimization: burst drain pending audio packets without sleeping
+        while (!PltIsThreadInterrupted(&receiveThread)) {
+            PQUEUED_AUDIO_PACKET drainPkt = packet;
+            if (drainPkt == NULL) {
+                drainPkt = (PQUEUED_AUDIO_PACKET)malloc(sizeof(*drainPkt));
+                if (drainPkt == NULL) break;
+            }
+
+            int drainBytes = (int)recvfrom(rtpSocket, &drainPkt->data[0], MAX_PACKET_SIZE, MSG_DONTWAIT, NULL, NULL);
+            if (drainBytes <= 0) {
+                if (packet == NULL) packet = drainPkt;
+                break;
+            }
+            if (drainBytes < (int)sizeof(RTP_PACKET)) {
+                if (packet == NULL) packet = drainPkt;
+                continue;
+            }
+
+            drainPkt->header.size = drainBytes;
+            PRTP_PACKET drainRtp = (PRTP_PACKET)&drainPkt->data[0];
+            if (packetsToDrop > 0) {
+                if (drainRtp->packetType == 97) packetsToDrop--;
+                if (packet == NULL) packet = drainPkt;
+                continue;
+            }
+
+            drainRtp->sequenceNumber = BE16(drainRtp->sequenceNumber);
+            drainRtp->timestamp = BE32(drainRtp->timestamp);
+            drainRtp->ssrc = BE32(drainRtp->ssrc);
+
+            int dStatus = RtpaAddPacket(&rtpAudioQueue, drainRtp, (uint16_t)drainBytes);
+            if (RTPQ_HANDLE_NOW(dStatus)) {
+                if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+                    if (!queuePacketToLbq(&drainPkt)) {
+                        free(drainPkt);
+                        packet = NULL;
+                        break;
+                    }
+                    packet = NULL;
+                } else {
+                    decodeInputData(drainPkt);
+                    packet = drainPkt;
+                }
+            } else {
+                if (RTPQ_PACKET_CONSUMED(dStatus)) {
+                    packet = NULL;
+                } else {
+                    packet = drainPkt;
+                }
+
+                if (RTPQ_PACKET_READY(dStatus)) {
+                    uint16_t dLen;
+                    PQUEUED_AUDIO_PACKET qPkt;
+                    while ((qPkt = (PQUEUED_AUDIO_PACKET)RtpaGetQueuedPacket(&rtpAudioQueue, sizeof(QUEUED_AUDIO_PACKET_HEADER), &dLen)) != NULL) {
+                        qPkt->header.size = dLen;
+                        if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+                            if (!queuePacketToLbq(&qPkt)) {
+                                free(qPkt);
+                                break;
+                            }
+                        } else {
+                            decodeInputData(qPkt);
+                            free(qPkt);
+                        }
+                    }
+                }
+            }
+        }
     }
     
     if (packet != NULL) {

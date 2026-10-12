@@ -10,7 +10,7 @@
 #define AXIS_DEAD_ZONE 0.1f
 
 // Debug settings
-#define GAMEPAD_DEBUG 1
+#define GAMEPAD_DEBUG 0
 
 // Send debug overlay message every N changed samples.
 // 1 = very noisy, 5 = good for manual testing, 30 = quieter.

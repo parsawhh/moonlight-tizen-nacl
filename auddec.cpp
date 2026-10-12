@@ -3,7 +3,8 @@
 #define MAX_CHANNEL_COUNT 2
 #define FRAME_SIZE 240
 
-#define CIRCULAR_BUFFER_SIZE 32
+// Tightened from 32 (160ms) to 8 (40ms) to prevent audio drift / backlog latency
+#define CIRCULAR_BUFFER_SIZE 8
 
 // This code uses volatiles for synchronization between the producer and consumer side. This is
 // only safe because this code executes under very specific conditions, namely that the framework

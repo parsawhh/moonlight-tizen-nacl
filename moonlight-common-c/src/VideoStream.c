@@ -223,18 +223,68 @@ static void VideoReceiveThreadProc(void* context) {
             }
         }
 
-        // Convert fields to host byte-order
-        packet = (PRTP_PACKET)&buffer[0];
-        packet->sequenceNumber = BE16(packet->sequenceNumber);
-        packet->timestamp = BE32(packet->timestamp);
-        packet->ssrc = BE32(packet->ssrc);
+    // Convert fields to host byte-order
+    packet = (PRTP_PACKET)&buffer[0];
+    packet->sequenceNumber = BE16(packet->sequenceNumber);
+    packet->timestamp = BE32(packet->timestamp);
+    packet->ssrc = BE32(packet->ssrc);
 
-        queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
+    queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
 
-        if (queueStatus == RTPF_RET_QUEUED) {
-            // The queue owns the buffer
-            buffer = NULL;
+    if (queueStatus == RTPF_RET_QUEUED) {
+        // The queue owns the buffer
+        buffer = NULL;
+    }
+
+    // Network drain optimization: burst drain pending socket packets without waiting or sleeping
+    while (!PltIsThreadInterrupted(&receiveThread)) {
+        char* drainBuffer = buffer;
+        if (drainBuffer == NULL) {
+            drainBuffer = (char*)malloc(bufferSize);
+            if (drainBuffer == NULL) break;
         }
+
+        int drainErr = (int)recvfrom(rtpSocket, encrypted ? encryptedBuffer : drainBuffer, receiveSize, MSG_DONTWAIT, NULL, NULL);
+        if (drainErr <= 0) {
+            // No more burst packets ready immediately
+            if (buffer == NULL) buffer = drainBuffer;
+            break;
+        }
+
+        if (drainErr < minSize) {
+            if (buffer == NULL) buffer = drainBuffer;
+            continue;
+        }
+
+        if (encrypted) {
+            PENC_VIDEO_HEADER encHeader = (PENC_VIDEO_HEADER)encryptedBuffer;
+            if (encHeader->frameNumber && LE32(encHeader->frameNumber) < RtpvGetCurrentFrameNumber(&rtpQueue)) {
+                if (buffer == NULL) buffer = drainBuffer;
+                continue;
+            }
+            if (!PltDecryptMessage(decryptionCtx, ALGORITHM_AES_GCM, 0,
+                                   (unsigned char*)StreamConfig.remoteInputAesKey, sizeof(StreamConfig.remoteInputAesKey),
+                                   encHeader->iv, sizeof(encHeader->iv),
+                                   encHeader->tag, sizeof(encHeader->tag),
+                                   ((unsigned char*)(encHeader + 1)), drainErr - sizeof(ENC_VIDEO_HEADER),
+                                   (unsigned char*)drainBuffer, &drainErr)) {
+                if (buffer == NULL) buffer = drainBuffer;
+                continue;
+            }
+        }
+
+        PRTP_PACKET drainPkt = (PRTP_PACKET)&drainBuffer[0];
+        drainPkt->sequenceNumber = BE16(drainPkt->sequenceNumber);
+        drainPkt->timestamp = BE32(drainPkt->timestamp);
+        drainPkt->ssrc = BE32(drainPkt->ssrc);
+
+        int qStatus = RtpvAddPacket(&rtpQueue, drainPkt, drainErr, (PRTPV_QUEUE_ENTRY)&drainBuffer[decryptedSize]);
+        if (qStatus == RTPF_RET_QUEUED) {
+            buffer = NULL;
+        } else {
+            buffer = drainBuffer;
+        }
+    }
     }
 
     if (buffer != NULL) {

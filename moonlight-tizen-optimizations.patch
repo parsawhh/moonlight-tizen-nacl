@@ -1,0 +1,160 @@
+diff --git a/.github/workflows/build-wgt.yml b/.github/workflows/build-wgt.yml
+index 5d7bc50..1c0f76c 100644
+--- a/.github/workflows/build-wgt.yml
++++ b/.github/workflows/build-wgt.yml
+@@ -44,4 +44,6 @@ jobs:
+         uses: softprops/action-gh-release@v2
+         if: startsWith(github.ref, 'refs/tags/')
+         with:
+-          files: output/MoonlightNaCl.wgt
++          files: |
++            output/MoonlightNaCl.wgt
++            moonlight-tizen-optimizations.patch
+diff --git a/moonlight-common-c/src/PlatformSockets.c b/moonlight-common-c/src/PlatformSockets.c
+index 3f79589..61d8b30 100644
+--- a/moonlight-common-c/src/PlatformSockets.c
++++ b/moonlight-common-c/src/PlatformSockets.c
+@@ -280,11 +280,30 @@ static void setSocketQos(SOCKET s, int socketQosType) {
+         return;
+     }
+ 
+-    // Linux
++    // Linux: set SO_PRIORITY
+     if (setsockopt(s, SOL_SOCKET, SO_PRIORITY, (char*)&value, sizeof(value)) < 0) {
+         Limelog("setsockopt(SO_PRIORITY, %d) failed: %d\n", value, (int)LastSocketError());
+     }
+ #endif
++#ifdef IP_TOS
++    int tosValue;
++    switch (socketQosType) {
++    case SOCK_QOS_TYPE_BEST_EFFORT:
++        tosValue = 0x00;
++        break;
++    case SOCK_QOS_TYPE_AUDIO:
++        tosValue = 0xB8; // DSCP EF (Expedited Forwarding)
++        break;
++    case SOCK_QOS_TYPE_VIDEO:
++        tosValue = 0x88; // DSCP AF41 (Interactive Video)
++        break;
++    default:
++        return;
++    }
++    if (setsockopt(s, IPPROTO_IP, IP_TOS, (char*)&tosValue, sizeof(tosValue)) < 0) {
++        Limelog("setsockopt(IP_TOS, 0x%02x) failed: %d\n", tosValue, (int)LastSocketError());
++    }
++#endif
+ }
+ 
+ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int socketQosType) {
+diff --git a/moonlight-common-c/src/VideoStream.c b/moonlight-common-c/src/VideoStream.c
+index b94c8b2..d591668 100644
+--- a/moonlight-common-c/src/VideoStream.c
++++ b/moonlight-common-c/src/VideoStream.c
+@@ -223,19 +223,69 @@ static void VideoReceiveThreadProc(void* context) {
+             }
+         }
+ 
+-        // Convert fields to host byte-order
+-        packet = (PRTP_PACKET)&buffer[0];
+-        packet->sequenceNumber = BE16(packet->sequenceNumber);
+-        packet->timestamp = BE32(packet->timestamp);
+-        packet->ssrc = BE32(packet->ssrc);
++    // Convert fields to host byte-order
++    packet = (PRTP_PACKET)&buffer[0];
++    packet->sequenceNumber = BE16(packet->sequenceNumber);
++    packet->timestamp = BE32(packet->timestamp);
++    packet->ssrc = BE32(packet->ssrc);
+ 
+-        queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
++    queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
+ 
+-        if (queueStatus == RTPF_RET_QUEUED) {
+-            // The queue owns the buffer
++    if (queueStatus == RTPF_RET_QUEUED) {
++        // The queue owns the buffer
++        buffer = NULL;
++    }
++
++    // Network drain optimization: burst drain pending socket packets without waiting or sleeping
++    while (!PltIsThreadInterrupted(&receiveThread)) {
++        char* drainBuffer = buffer;
++        if (drainBuffer == NULL) {
++            drainBuffer = (char*)malloc(bufferSize);
++            if (drainBuffer == NULL) break;
++        }
++
++        int drainErr = (int)recvfrom(rtpSocket, encrypted ? encryptedBuffer : drainBuffer, receiveSize, MSG_DONTWAIT, NULL, NULL);
++        if (drainErr <= 0) {
++            // No more burst packets ready immediately
++            if (buffer == NULL) buffer = drainBuffer;
++            break;
++        }
++
++        if (drainErr < minSize) {
++            if (buffer == NULL) buffer = drainBuffer;
++            continue;
++        }
++
++        if (encrypted) {
++            PENC_VIDEO_HEADER encHeader = (PENC_VIDEO_HEADER)encryptedBuffer;
++            if (encHeader->frameNumber && LE32(encHeader->frameNumber) < RtpvGetCurrentFrameNumber(&rtpQueue)) {
++                if (buffer == NULL) buffer = drainBuffer;
++                continue;
++            }
++            if (!PltDecryptMessage(decryptionCtx, ALGORITHM_AES_GCM, 0,
++                                   (unsigned char*)StreamConfig.remoteInputAesKey, sizeof(StreamConfig.remoteInputAesKey),
++                                   encHeader->iv, sizeof(encHeader->iv),
++                                   encHeader->tag, sizeof(encHeader->tag),
++                                   ((unsigned char*)(encHeader + 1)), drainErr - sizeof(ENC_VIDEO_HEADER),
++                                   (unsigned char*)drainBuffer, &drainErr)) {
++                if (buffer == NULL) buffer = drainBuffer;
++                continue;
++            }
++        }
++
++        PRTP_PACKET drainPkt = (PRTP_PACKET)&drainBuffer[0];
++        drainPkt->sequenceNumber = BE16(drainPkt->sequenceNumber);
++        drainPkt->timestamp = BE32(drainPkt->timestamp);
++        drainPkt->ssrc = BE32(drainPkt->ssrc);
++
++        int qStatus = RtpvAddPacket(&rtpQueue, drainPkt, drainErr, (PRTPV_QUEUE_ENTRY)&drainBuffer[decryptedSize]);
++        if (qStatus == RTPF_RET_QUEUED) {
+             buffer = NULL;
++        } else {
++            buffer = drainBuffer;
+         }
+     }
++    }
+ 
+     if (buffer != NULL) {
+         free(buffer);
+diff --git a/viddec.cpp b/viddec.cpp
+index df6c734..e701709 100644
+--- a/viddec.cpp
++++ b/viddec.cpp
+@@ -87,7 +87,7 @@ bool MoonlightInstance::InitializeRenderingSurface(int width, int height) {
+     }
+     
+     int32_t contextAttributes[] = {
+-        PP_GRAPHICS3DATTRIB_ALPHA_SIZE,     8,
++        PP_GRAPHICS3DATTRIB_ALPHA_SIZE,     0,
+         PP_GRAPHICS3DATTRIB_BLUE_SIZE,      8,
+         PP_GRAPHICS3DATTRIB_GREEN_SIZE,     8,
+         PP_GRAPHICS3DATTRIB_RED_SIZE,       8,
+@@ -248,6 +248,16 @@ void MoonlightInstance::VidDecCleanup(void) {
+ 
+ static void WriteSpsNalu(PLENTRY nalu, unsigned char* outBuffer, unsigned int* offset) {
+     int start_len = nalu->data[2] == 0x01 ? 3 : 4;
++    
++    // Fast path: if SPS has enough bytes, patch level_idc in-place and avoid h264bitstream heap allocation
++    // SPS byte structure: [start code 3/4B] [nal_unit_type 1B] [profile_idc 1B] [constraint_flags 1B] [level_idc 1B]
++    if (nalu->length >= start_len + 4) {
++        unsigned char* spsBody = (unsigned char*)&nalu->data[start_len];
++        if (spsBody[3] > 42) {
++            spsBody[3] = 42; // Spoof level_idc to 4.2 in-place
++        }
++    }
++
+     h264_stream_t* stream = h264_new();
+     
+     // Read the old NALU

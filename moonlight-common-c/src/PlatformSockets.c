@@ -280,9 +280,28 @@ static void setSocketQos(SOCKET s, int socketQosType) {
         return;
     }
 
-    // Linux
+    // Linux: set SO_PRIORITY
     if (setsockopt(s, SOL_SOCKET, SO_PRIORITY, (char*)&value, sizeof(value)) < 0) {
         Limelog("setsockopt(SO_PRIORITY, %d) failed: %d\n", value, (int)LastSocketError());
+    }
+#endif
+#ifdef IP_TOS
+    int tosValue;
+    switch (socketQosType) {
+    case SOCK_QOS_TYPE_BEST_EFFORT:
+        tosValue = 0x00;
+        break;
+    case SOCK_QOS_TYPE_AUDIO:
+        tosValue = 0xB8; // DSCP EF (Expedited Forwarding)
+        break;
+    case SOCK_QOS_TYPE_VIDEO:
+        tosValue = 0x88; // DSCP AF41 (Interactive Video)
+        break;
+    default:
+        return;
+    }
+    if (setsockopt(s, IPPROTO_IP, IP_TOS, (char*)&tosValue, sizeof(tosValue)) < 0) {
+        Limelog("setsockopt(IP_TOS, 0x%02x) failed: %d\n", tosValue, (int)LastSocketError());
     }
 #endif
 }

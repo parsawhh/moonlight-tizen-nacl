@@ -87,7 +87,7 @@ bool MoonlightInstance::InitializeRenderingSurface(int width, int height) {
     }
     
     int32_t contextAttributes[] = {
-        PP_GRAPHICS3DATTRIB_ALPHA_SIZE,     8,
+        PP_GRAPHICS3DATTRIB_ALPHA_SIZE,     0,
         PP_GRAPHICS3DATTRIB_BLUE_SIZE,      8,
         PP_GRAPHICS3DATTRIB_GREEN_SIZE,     8,
         PP_GRAPHICS3DATTRIB_RED_SIZE,       8,
@@ -248,6 +248,16 @@ void MoonlightInstance::VidDecCleanup(void) {
 
 static void WriteSpsNalu(PLENTRY nalu, unsigned char* outBuffer, unsigned int* offset) {
     int start_len = nalu->data[2] == 0x01 ? 3 : 4;
+    
+    // Fast path: if SPS has enough bytes, patch level_idc in-place and avoid h264bitstream heap allocation
+    // SPS byte structure: [start code 3/4B] [nal_unit_type 1B] [profile_idc 1B] [constraint_flags 1B] [level_idc 1B]
+    if (nalu->length >= start_len + 4) {
+        unsigned char* spsBody = (unsigned char*)&nalu->data[start_len];
+        if (spsBody[3] > 42) {
+            spsBody[3] = 42; // Spoof level_idc to 4.2 in-place
+        }
+    }
+
     h264_stream_t* stream = h264_new();
     
     // Read the old NALU

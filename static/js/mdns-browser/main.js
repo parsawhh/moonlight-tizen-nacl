@@ -1,202 +1,134 @@
-
 /**
- * Construct a new ServiceFinder. This is a single-use object that does a DNS
- * multicast search on creation.
- * @constructor
- * @param {function} callback The callback to be invoked when this object is
- *                            updated, or when an error occurs (passes string).
+ * Unified host discovery for Tizen using HTTP Subnet sweep.
+ * Tizen Smart TVs cannot use Chrome App APIs (chrome.sockets.udp).
+ * This scanner queries webapis.network for local IP and sweeps the /24 subnet.
  */
-var ServiceFinder = function(callback) {
-  this.callback_ = callback;
-  this.byIP_ = {};
-  this.byService_ = {};
 
-  // Set up receive handlers.
-  this.onReceiveListener_ = this.onReceive_.bind(this);
-  chrome.sockets.udp.onReceive.addListener(this.onReceiveListener_);
-  this.onReceiveErrorListener_ = this.onReceiveError_.bind(this);
-  chrome.sockets.udp.onReceiveError.addListener(this.onReceiveErrorListener_);
+function findNvService(ipString) {
+  var ip = ipString.replace('ipv4:', '');
 
-  ServiceFinder.forEachAddress_(function(address, error) {
-    if (error) {
-      this.callback_(error);
-      return true;
-    }
-    if (address.indexOf(':') != -1) {
-      // TODO: ipv6.
-      console.log('IPv6 address unsupported', address);
-      return true;
-    }
-    console.log('Broadcasting to address', address);
-
-    ServiceFinder.bindToAddress_(address, function(socket) {
-      if (!socket) {
-        this.callback_('could not bind UDP socket');
-        return true;
-      }
-      // Broadcast on it.
-      this.broadcast_(socket, address);
-    }.bind(this));
-  }.bind(this));
-
-  // After a short time, if our database is empty, report an error.
-  setTimeout(function() {
-    if (!Object.keys(this.byIP_).length) {
-      this.callback_('no mDNS services found!');
-    }
-  }.bind(this), 10 * 1000);
-};
-
-/**
- * Invokes the callback for every local network address on the system.
- * @private
- * @param {function} callback to invoke
- */
-ServiceFinder.forEachAddress_ = function(callback) {
-  chrome.system.network.getNetworkInterfaces(function(networkInterfaces) {
-    if (!networkInterfaces.length) {
-      callback(null, 'no network available!');
-      return true;
-    }
-    networkInterfaces.forEach(function(networkInterface) {
-      callback(networkInterface['address'], null);
-    });
-  });
-};
-
-/**
- * Creates UDP socket bound to the specified address, passing it to the
- * callback. Passes null on failure.
- * @private
- * @param {string} address to bind to
- * @param {function} callback to invoke when done
- */
-ServiceFinder.bindToAddress_ = function(address, callback) {
-  chrome.sockets.udp.create({}, function(createInfo) {
-    chrome.sockets.udp.bind(createInfo['socketId'], address, 0,
-        function(result) {
-      callback((result >= 0) ? createInfo['socketId'] : null);
-    });
-  });
-};
-
-/**
- * Sorts the passed list of string IPs in-place.
- * @private
- */
-ServiceFinder.sortIps_ = function(arg) {
-  arg.sort(ServiceFinder.sortIps_.sort);
-  return arg;
-};
-ServiceFinder.sortIps_.sort = function(l, r) {
-  // TODO: support v6.
-  var lp = l.split('.').map(ServiceFinder.sortIps_.toInt_);
-  var rp = r.split('.').map(ServiceFinder.sortIps_.toInt_);
-  for (var i = 0; i < Math.min(lp.length, rp.length); ++i) {
-    if (lp[i] < rp[i]) {
-      return -1;
-    } else if (lp[i] > rp[i]) {
-      return +1;
-    }
-  }
-  return 0;
-};
-ServiceFinder.sortIps_.toInt_ = function(i) { return +i };
-
-/**
- * Returns the services found by this ServiceFinder, optionally filtered by IP.
- */
-ServiceFinder.prototype.services = function(opt_ip) {
-  var k = Object.keys(opt_ip ? this.byIP_[opt_ip] : this.byService_);
-  k.sort();
-  return k;
-};
-
-/**
- * Returns the IPs found by this ServiceFinder, optionally filtered by service.
- */
-ServiceFinder.prototype.ips = function(opt_service) {
-  var k = Object.keys(opt_service ? this.byService_[opt_service] : this.byIP_);
-  return ServiceFinder.sortIps_(k);
-};
-
-/**
- * Handles an incoming UDP packet.
- * @private
- */
-ServiceFinder.prototype.onReceive_ = function(info) {
-  var getDefault_ = function(o, k, def) {
-    (k in o) || false == (o[k] = def);
-    return o[k];
-  };
-
-  // Update our local database.
-  // TODO: Resolve IPs using the dns extension.
-  var packet = DNSPacket.parse(info.data);
-  var byIP = getDefault_(this.byIP_, info.remoteAddress, {});
-
-  packet.each('an', 12, function(rec) {
-    var ptr = rec.asName();
-    var byService = getDefault_(this.byService_, ptr, {})
-    byService[info.remoteAddress] = true;
-    byIP[ptr] = true;
-  }.bind(this));
-
-  // Ping! Something new is here. Only update every 500ms.
-  if (!this.callback_pending_) {
-    this.callback_pending_ = true;
-    setTimeout(function() {
-      this.callback_pending_ = undefined;
-      this.callback_();
-    }.bind(this), 500);
-  }
-};
-
-/**
- * Handles network error occured while waiting for data.
- * @private
- */
-ServiceFinder.prototype.onReceiveError_ = function(info) {
-  this.callback_(info.resultCode);
-  return true;
-}
-
-/**
- * Broadcasts for services on the given socket/address.
- * @private
- */
-ServiceFinder.prototype.broadcast_ = function(sock, address) {
-  var packet = new DNSPacket();
-  packet.push('qd', new DNSRecord('_services._dns-sd._udp.local', 12, 1));
-
-  var raw = packet.serialize();
-  chrome.sockets.udp.send(sock, raw, '224.0.0.251', 5353, function(sendInfo) {
-    if (sendInfo.resultCode < 0)
-      this.callback_('Could not send data to:' + address);
-  });
-};
-
-ServiceFinder.prototype.shutdown = function() {
-  // Remove event listeners.
-  chrome.sockets.udp.onReceive.removeListener(this.onReceiveListener_);
-  chrome.sockets.udp.onReceiveError.removeListener(this.onReceiveErrorListener_);
-  // Close opened sockets.
-  chrome.sockets.udp.getSockets(function(sockets) {
-    sockets.forEach(function(sock) {
-      chrome.sockets.udp.close(sock.socketId);
-    });
-  });
-}
-
-var finder = null;
-
-function findNvService(callback) {
-  if (!runningOnChrome()) {
+  var discoveredHost = new NvHTTP(ip, myUniqueid);
+  discoveredHost.pollServer(function(returnedDiscoveredHost) {
+    if (!returnedDiscoveredHost.online) {
       return;
+    }
+    if (hosts[returnedDiscoveredHost.serverUid] != null) {
+      hosts[returnedDiscoveredHost.serverUid].address = returnedDiscoveredHost.address;
+      if (typeof hosts[returnedDiscoveredHost.serverUid].updateExternalAddressIP4 === 'function') {
+        hosts[returnedDiscoveredHost.serverUid].updateExternalAddressIP4();
+      }
+      saveHosts();
+    } else {
+      addHostToGrid(returnedDiscoveredHost, true);
+      beginBackgroundPollingOfHost(returnedDiscoveredHost);
+      saveHosts();
+    }
+  });
+}
+
+window.subnetScanAbortCtrl = null;
+window.subnetScanPromise = null;
+
+function startSubnetScanner() {
+  if (window.subnetScanPromise) {
+    return window.subnetScanPromise;
   }
 
-  finder && finder.shutdown();
-  finder = new ServiceFinder(function (opt_error) {
-      callback(finder, opt_error);
+  window.subnetScanPromise = new Promise(function(resolve) {
+    try {
+      var localIp = null;
+      if (typeof webapis !== 'undefined' && webapis.network && typeof webapis.network.getIp === 'function') {
+        localIp = webapis.network.getIp();
+      } else if (typeof tizen !== 'undefined' && tizen.systeminfo) {
+        try {
+          // fallback
+          localIp = null;
+        } catch(e) {}
+      }
+
+      if (!localIp) {
+        console.warn('[startSubnetScanner] Local IP not detectable via webapis.network. Trying common subnets...');
+        // Default to common 192.168.1.x and 192.168.0.x if local IP couldn't be resolved
+        localIp = '192.168.1.1';
+      }
+
+      var parts = localIp.split('.');
+      if (parts.length !== 4) {
+        window.subnetScanPromise = null;
+        return resolve();
+      }
+
+      var subnet = parts[0] + '.' + parts[1] + '.' + parts[2];
+      console.log('[startSubnetScanner] Sweeping subnet:', subnet + '.0/24');
+
+      if (window.subnetScanAbortCtrl) {
+        window.subnetScanAbortCtrl.abort();
+      }
+      window.subnetScanAbortCtrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+
+      var IPs = [];
+      for (var i = 1; i <= 254; i++) {
+        IPs.push(subnet + '.' + i);
+      }
+
+      var index = 0;
+      var activeCount = 0;
+      var concurrency = 32; // safe concurrency on older TV hardware
+
+      function scanNext() {
+        if (!window.subnetScanAbortCtrl || index >= IPs.length) {
+          if (activeCount === 0) {
+            window.subnetScanPromise = null;
+            resolve();
+          }
+          return;
+        }
+
+        var ip = IPs[index++];
+        activeCount++;
+
+        var localAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var timeoutId = setTimeout(function() {
+          if (localAbort) localAbort.abort();
+        }, 1200);
+
+        var onGlobalAbort = function() {
+          if (localAbort) localAbort.abort();
+        };
+
+        if (window.subnetScanAbortCtrl) {
+          window.subnetScanAbortCtrl.signal.addEventListener('abort', onGlobalAbort);
+        }
+
+        // Probe Sunshine / GFE HTTP port
+        fetch('http://' + ip + ':47989/serverinfo', localAbort ? { signal: localAbort.signal } : {})
+          .then(function(res) {
+            clearTimeout(timeoutId);
+            if (res.ok) {
+              console.log('[startSubnetScanner] Discovered Sunshine/GFE host at:', ip);
+              findNvService('ipv4:' + ip);
+            }
+            if (window.subnetScanAbortCtrl) window.subnetScanAbortCtrl.signal.removeEventListener('abort', onGlobalAbort);
+            activeCount--;
+            scanNext();
+          })
+          .catch(function() {
+            clearTimeout(timeoutId);
+            if (window.subnetScanAbortCtrl) window.subnetScanAbortCtrl.signal.removeEventListener('abort', onGlobalAbort);
+            activeCount--;
+            scanNext();
+          });
+      }
+
+      for (var c = 0; c < Math.min(concurrency, IPs.length); c++) {
+        scanNext();
+      }
+    } catch (e) {
+      console.error('[startSubnetScanner] Failed:', e);
+      window.subnetScanPromise = null;
+      resolve();
+    }
   });
+
+  return window.subnetScanPromise;
 }

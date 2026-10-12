@@ -177,35 +177,10 @@ function restoreUiAfterNaClLoad() {
   Navigation.push(Views.Hosts);
   showHostsAndSettingsMode();
 
-  findNvService(function (finder, opt_error) {
-    if (finder.byService_['_nvstream._tcp']) {
-      var ips = Object.keys(finder.byService_['_nvstream._tcp']);
-      for (var i in ips) {
-        var ip = ips[i];
-        if (finder.byService_['_nvstream._tcp'][ip]) {
-          var mDnsDiscoveredHost = new NvHTTP(ip, myUniqueid);
-          mDnsDiscoveredHost.pollServer(function (returneMdnsDiscoveredHost) {
-            // Just drop this if the host doesn't respond
-            if (!returneMdnsDiscoveredHost.online) {
-              return;
-            }
-
-            if (hosts[returneMdnsDiscoveredHost.serverUid] != null) {
-              // if we're seeing a host we've already seen before, update it for the current local IP.
-              hosts[returneMdnsDiscoveredHost.serverUid].address = returneMdnsDiscoveredHost.address;
-              hosts[returneMdnsDiscoveredHost.serverUid].updateExternalAddressIP4();
-            } else {
-              // Host must be in the grid before starting background polling
-              addHostToGrid(returneMdnsDiscoveredHost, true);
-              beginBackgroundPollingOfHost(returneMdnsDiscoveredHost);
-            }
-
-            saveHosts();
-          });
-        }
-      }
-    }
-  });
+  // Start background HTTP subnet sweep to automatically discover Sunshine/GFE hosts
+  if (typeof startSubnetScanner === 'function') {
+    startSubnetScanner();
+  }
 }
 
 function beginBackgroundPollingOfHost(host) {

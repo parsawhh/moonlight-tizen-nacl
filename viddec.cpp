@@ -41,7 +41,7 @@ static const char k_VertexShader[] =
     "}";
 
 static const char k_FragmentShader2D[] =
-    "precision mediump float;            \n"
+    "precision lowp float;            \n"
     "varying vec2 v_texCoord;            \n"
     "uniform sampler2D s_texture;        \n"
     "void main()                         \n"
@@ -51,7 +51,7 @@ static const char k_FragmentShader2D[] =
     
 static const char k_FragmentShaderRectangle[] =
     "#extension GL_ARB_texture_rectangle : require\n"
-    "precision mediump float;            \n"
+    "precision lowp float;            \n"
     "varying vec2 v_texCoord;            \n"
     "uniform sampler2DRect s_texture;    \n"
     "void main()                         \n"
@@ -61,7 +61,7 @@ static const char k_FragmentShaderRectangle[] =
     
 static const char k_FragmentShaderExternal[] =
       "#extension GL_OES_EGL_image_external : require\n"
-      "precision mediump float;            \n"
+      "precision lowp float;            \n"
       "varying vec2 v_texCoord;            \n"
       "uniform samplerExternalOES s_texture; \n"
       "void main()                         \n"
@@ -259,6 +259,12 @@ static void WriteSpsNalu(PLENTRY nalu, unsigned char* outBuffer, unsigned int* o
     stream->sps->num_ref_frames = 1;
     stream->sps->vui.max_dec_frame_buffering = 1;
     
+    // Tizen HW decode hack: spoof SPS level_idc to 42 (Level 4.2)
+    // Allows high-resolution streams (1440p/4K) to bypass the Tizen PPAPI Level check
+    if (stream->sps->level_idc > 42) {
+        stream->sps->level_idc = 42;
+    }
+    
     // Copy the NALU prefix over from the original SPS
     memcpy(&outBuffer[*offset], nalu->data, start_len);
     *offset += start_len;
@@ -362,9 +368,8 @@ void MoonlightInstance::PaintPicture(void) {
         return;
     }
     
-    // Calling glClear() once per frame is recommended for modern
-    // GPUs which use it for state tracking hints.
-    glClear(GL_COLOR_BUFFER_BIT);
+    // Omit glClear on full-screen opaque video quads to conserve Mali tile bandwidth
+    // glClear(GL_COLOR_BUFFER_BIT);
     
     int originalTextureTarget = s_LastTextureType;
     

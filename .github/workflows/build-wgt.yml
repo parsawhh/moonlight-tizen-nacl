@@ -1,0 +1,47 @@
+name: Build Moonlight Tizen WGT
+
+on:
+  push:
+    branches: [ samsung_nacl, main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build SDK base image
+        run: |
+          docker build -t moonlight-tizen-nacl-sdk:5.6 -f Dockerfile.sdk .
+
+      - name: Build Moonlight App Package
+        run: |
+          docker build -t moonlight-tizen-nacl .
+
+      - name: Extract .wgt artifact
+        run: |
+          mkdir -p output
+          docker create --name temp-container moonlight-tizen-nacl
+          docker cp temp-container:/home/moonlight/MoonlightNaCl.wgt output/
+          docker rm temp-container
+          ls -lh output/
+
+      - name: Upload WGT artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoonlightNaCl-Optimized
+          path: output/MoonlightNaCl.wgt
+
+      - name: Release WGT
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: output/MoonlightNaCl.wgt

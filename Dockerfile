@@ -18,6 +18,8 @@ RUN mkdir -p build/static build/pnacl/Release
 
 RUN pepper_63/toolchain/linux_pnacl/bin/pnacl-translate \
     -arch arm \
+    -O3 \
+    -mattr=+neon \
     moonlight-tizen-nacl/pnacl/Release/moonlight-chrome.pexe \
     -o build/pnacl/Release/moonlight-chrome-arm.nexe
 
